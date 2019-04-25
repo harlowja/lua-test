@@ -13,6 +13,7 @@ extern "C" {
 #include <map>
 
 #include <boost/filesystem/path.hpp>
+#include <boost/filesystem/operations.hpp>
 
 enum class SettingType {
     DOUBLE, INTEGER, STRING, BOOL, NIL,
@@ -21,6 +22,8 @@ enum class SettingType {
 // Ideally we'd provide something like what json cpp does over these
 // raw values... and then give that to a programs constructor for actual
 // usage...
+//
+// See: https://open-source-parsers.github.io/jsoncpp-docs/doxygen/index.html#_example
 struct Setting {
     Setting(const SettingType & t) : type(t) {};
     SettingType type;
@@ -29,36 +32,47 @@ struct Setting {
 
 class ProgramSettingsRunner {
 public:
-    ProgramSettingsRunner(const boost::filesystem::path & prog_path) : _prog_path(prog_path) {
+    ProgramSettingsRunner(const std::string & component, const boost::filesystem::path & script_path) : _script_path(script_path), _component(component) {
     }
     std::map<std::string, Setting> run() {
-        std::string prog_path = _prog_path.string();
+        int res;
+        std::string script_path = _script_path.string();
+        if (!boost::filesystem::is_regular_file(_script_path)) {
+            std::stringstream ss;
+            ss << "Can not run unknown file: " << script_path;
+            throw std::runtime_error(ss.str());
+        }
         std::shared_ptr<lua_State> engine(luaL_newstate(), lua_close);
         if (!engine) {
             throw std::runtime_error("Could not create new lua engine!");
         }
         // TODO: limit the accessible libraries.
         luaL_openlibs(engine.get());
-        int res = luaL_loadfile(engine.get(), prog_path.c_str());
+        res = luaL_loadfile(engine.get(), script_path.c_str());
         if (res != 0) {
             std::stringstream ss;
-            ss << "Could not load file: " << prog_path;
+            ss << "Could not load file: " << script_path;
             throw std::runtime_error(ss.str());
         }
         res = lua_pcall(engine.get(), 0, 0, 0);
         if (res != 0) {
+            // TODO: handle call errors better...
             std::stringstream ss;
-            ss << "Could not run file: " << prog_path;
+            ss << "Could not run file: " << script_path;
             throw std::runtime_error(ss.str());
         }
         lua_getglobal(engine.get(), "build");
-        lua_pushstring(engine.get(), std::getenv("VEHICLE_NAME"));
-        lua_call(engine.get(), 1, 1);
+        char * v = std::getenv("VEHICLE_NAME");
+        lua_pushstring(engine.get(), v);
+        lua_pushstring(engine.get(), _component.c_str());
+        lua_call(engine.get(), 2, 1);
+        // TODO: handle call errors...
         // TODO: ensure a table is on the stack...
         return convertTable(engine.get());
     }
 private:
-    boost::filesystem::path _prog_path;
+    boost::filesystem::path _script_path;
+    std::string _component;
     std::map<std::string, Setting> convertTable(lua_State *L) {
         std::map<std::string, Setting> m;
         lua_pushnil(L);
@@ -99,6 +113,7 @@ private:
                 m.insert({k, s});
             }
             else if(lua_istable(L, -1)) {
+                // TODO: support this?
                 throw std::runtime_error("Nested tables not currently supported!");
             }
             lua_pop(L, 1);
@@ -131,8 +146,9 @@ void printSettings(const std::map<std::string, Setting> & settings) {
 }
 
 int main(int argc, char**argv) {
-    boost::filesystem::path p = argv[1];
-    ProgramSettingsRunner psr(p);
+    std::string component = argv[1];
+    boost::filesystem::path p = argv[2];
+    ProgramSettingsRunner psr(component, p);
     std::map<std::string, Setting> ps = psr.run();
     printSettings(ps);
     return 0;
